@@ -63,6 +63,8 @@ export interface Department {
   id: number;
   code: string;
   name: string;
+  name_zh_hans: string | null;
+  name_en: string | null;
   kind: DeptKind;
   parent_id: number | null;
   manager: string | null;

@@ -73,6 +73,8 @@ class PasswordChange(BaseModel):
 class DepartmentBase(BaseModel):
     code: str = Field(max_length=20)
     name: str = Field(max_length=100)
+    name_zh_hans: str | None = None
+    name_en: str | None = None
     kind: DeptKind = DeptKind.department
     parent_id: int | None = None
     manager: str | None = None
@@ -88,6 +90,8 @@ class DepartmentCreate(DepartmentBase):
 class DepartmentUpdate(BaseModel):
     code: str | None = None
     name: str | None = None
+    name_zh_hans: str | None = None
+    name_en: str | None = None
     kind: DeptKind | None = None
     parent_id: int | None = None
     manager: str | None = None

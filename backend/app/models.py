@@ -98,6 +98,8 @@ class Department(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     code: Mapped[str] = mapped_column(String(20), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(100))
+    name_zh_hans: Mapped[str | None] = mapped_column(String(100))
+    name_en: Mapped[str | None] = mapped_column(String(100))
     kind: Mapped[DeptKind] = mapped_column(Enum(DeptKind), default=DeptKind.department)
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("departments.id"), index=True)
     manager: Mapped[str | None] = mapped_column(String(50))

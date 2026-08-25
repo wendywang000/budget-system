@@ -11,6 +11,8 @@ const emptyForm = {
   id: null as number | null,
   code: "",
   name: "",
+  name_zh_hans: "",
+  name_en: "",
   kind: "department" as DeptKind,
   parent_id: "" as number | "",
   manager: "",
@@ -49,6 +51,8 @@ export default function DepartmentsTab() {
       id: dept.id,
       code: dept.code,
       name: dept.name,
+      name_zh_hans: dept.name_zh_hans ?? "",
+      name_en: dept.name_en ?? "",
       kind: dept.kind,
       parent_id: dept.parent_id ?? "",
       manager: dept.manager ?? "",
@@ -65,6 +69,8 @@ export default function DepartmentsTab() {
     const payload = {
       code: form.code,
       name: form.name,
+      name_zh_hans: form.name_zh_hans || null,
+      name_en: form.name_en || null,
       kind: form.kind,
       parent_id: form.parent_id === "" ? null : Number(form.parent_id),
       manager: form.manager || null,
@@ -167,8 +173,16 @@ export default function DepartmentsTab() {
             <input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} required />
           </label>
           <label>
-            名稱
+            名稱(繁體中文)
             <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
+          </label>
+          <label>
+            名稱(簡體中文)
+            <input value={form.name_zh_hans} onChange={(e) => setForm({ ...form, name_zh_hans: e.target.value })} />
+          </label>
+          <label>
+            名稱(英文)
+            <input value={form.name_en} onChange={(e) => setForm({ ...form, name_en: e.target.value })} />
           </label>
           <label>
             類型
