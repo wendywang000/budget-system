@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import io
-from datetime import datetime, timezone
+import re
+from datetime import date, datetime, timezone
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
@@ -63,6 +64,8 @@ DEPARTMENT_HEADERS = [
     "預算單位名稱(英文)",
     "上層預算單位代碼",
     "*單位種類代碼",
+    "負責人",
+    "生效日期",
 ]
 
 UNIT_KIND_CODE_TO_FUNCTION: dict[str, ExpenseFunction] = {
@@ -101,6 +104,8 @@ def _department_workbook(departments: list[Department]) -> Workbook:
                 dept.name_en or "",
                 parent.code if parent else "",
                 FUNCTION_TO_UNIT_KIND_CODE.get(dept.function, "") if dept.function else "",
+                dept.manager or "",
+                dept.effective_date.isoformat() if dept.effective_date else "",
             ]
         )
 
@@ -120,10 +125,48 @@ def export_departments(_: User = Depends(require_admin), db: Session = Depends(g
     return _xlsx_response(_department_workbook(departments), "departments.xlsx")
 
 
+#  匯入時依「表頭文字」找欄位,而非固定欄位順序,同時支援兩種來源格式:
+#  1. 本系統範本(*預算單位代碼 / 上層預算單位代碼 / *單位種類代碼 是 G/M/R/S 代碼)
+#  2. 公司現有成本中心表(部門=上層單位的「名稱」而非代碼、成本中心代号/名稱、負責人、生效日期…)
+CODE_HEADER_ALIASES = ("*預算單位代碼", "預算單位代碼", "成本中心代号", "成本中心代碼", "*成本中心代号")
+NAME_HEADER_ALIASES = ("*預算單位名稱(繁體中文)", "預算單位名稱(繁體中文)", "成本中心名稱", "*成本中心名稱")
+NAME_HANS_HEADER_ALIASES = ("預算單位名稱(簡體中文)",)
+NAME_EN_HEADER_ALIASES = ("預算單位名稱(英文)",)
+PARENT_CODE_HEADER_ALIASES = ("上層預算單位代碼", "上層單位代碼")
+PARENT_NAME_HEADER_ALIASES = ("部門",)
+FUNCTION_HEADER_ALIASES = ("*單位種類代碼", "單位種類代碼")
+MANAGER_HEADER_ALIASES = ("負責人", "主管")
+EFFECTIVE_DATE_HEADER_ALIASES = ("生效日期", "生效/建立日期", "建立日期", "生效年月日")
+
+
+def _find_column(headers: list[str], aliases: tuple[str, ...]) -> int | None:
+    for idx, header in enumerate(headers):
+        if header and header.strip() in aliases:
+            return idx
+    return None
+
+
+def _extract_date(value) -> date | None:  # noqa: ANN001
+    """儲存格可能是真正的日期,也可能是夾雜其他文字的備註(如「須…起(2024/2/1生效)」),兩種都嘗試解析。"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    match = re.search(r"(\d{4})[/\-年](\d{1,2})[/\-月](\d{1,2})", str(value))
+    if not match:
+        return None
+    try:
+        return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
+
+
 @router.post(
     "/departments/import",
     response_model=ImportResult,
-    summary="匯入預算單位主檔(依代碼覆蓋名稱/功能別,可用上層代碼建立組織樹)",
+    summary="匯入部門/成本中心主檔(依表頭自動辨識欄位,可用上層代碼或上層部門名稱建立組織樹)",
 )
 async def import_departments(
     file: UploadFile,
@@ -138,32 +181,72 @@ async def import_departments(
     ws = wb.active
 
     result = ImportResult()
+    header_row = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    col_code = _find_column(header_row, CODE_HEADER_ALIASES)
+    col_name = _find_column(header_row, NAME_HEADER_ALIASES)
+    if col_code is None or col_name is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "找不到「代碼」或「名稱」欄位,請確認表頭文字與範本一致")
+    col_name_hans = _find_column(header_row, NAME_HANS_HEADER_ALIASES)
+    col_name_en = _find_column(header_row, NAME_EN_HEADER_ALIASES)
+    col_parent_code = _find_column(header_row, PARENT_CODE_HEADER_ALIASES)
+    col_parent_name = _find_column(header_row, PARENT_NAME_HEADER_ALIASES)
+    col_function = _find_column(header_row, FUNCTION_HEADER_ALIASES)
+    col_manager = _find_column(header_row, MANAGER_HEADER_ALIASES)
+    col_effective_date = _find_column(header_row, EFFECTIVE_DATE_HEADER_ALIASES)
+
+    def raw_cell(row: tuple, col: int | None):  # noqa: ANN202
+        if col is None or col >= len(row) or row[col] in (None, ""):
+            return None
+        return row[col]
+
+    def cell(row: tuple, col: int | None) -> str | None:
+        value = raw_cell(row, col)
+        return str(value).strip() if value is not None else None
+
     rows = list(ws.iter_rows(min_row=2, values_only=True))
     by_code = {d.code: d for d in db.scalars(select(Department))}
+    by_name: dict[str, Department] = {}
+    for d in by_code.values():
+        by_name.setdefault(d.name, d)
 
-    # 第一輪:建立/更新每個預算單位(不設定上層,避免匯入順序影響),先確保所有代碼都存在
+    # 第 0 輪:「部門」欄若填的是名稱而非代碼,先依名稱找到或建立對應的上層節點
+    def get_or_create_parent_by_name(name: str) -> Department:
+        existing = by_name.get(name)
+        if existing is not None:
+            return existing
+        code = f"GRP-{name}"
+        suffix = 2
+        while code in by_code:
+            code = f"GRP-{name}-{suffix}"
+            suffix += 1
+        group = Department(code=code, name=name, kind=DeptKind.division)
+        db.add(group)
+        db.flush()
+        by_code[code] = group
+        by_name[name] = group
+        result.inserted += 1
+        return group
+
+    # 第一輪:建立/更新每個部門/成本中心(不設定上層,避免匯入順序影響),先確保所有代碼都存在
     parent_codes: dict[str, str] = {}
     for idx, row in enumerate(rows, start=2):
-        if not row or row[0] is None:
+        if not row or all(v is None for v in row):
             continue
-        code = str(row[0]).strip()
-        name = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
-        name_zh_hans = str(row[2]).strip() if len(row) > 2 and row[2] not in (None, "") else None
-        name_en = str(row[3]).strip() if len(row) > 3 and row[3] not in (None, "") else None
-        parent_code = str(row[4]).strip() if len(row) > 4 and row[4] not in (None, "") else ""
-        unit_kind_code = str(row[5]).strip().upper() if len(row) > 5 and row[5] not in (None, "") else ""
-
+        code = cell(row, col_code)
+        name = cell(row, col_name)
         if not code or not name:
             result.skipped += 1
-            result.errors.append(f"第 {idx} 列:預算單位代碼或名稱空白,已略過")
+            result.errors.append(f"第 {idx} 列:代碼或名稱空白,已略過")
             continue
+
+        unit_kind_code = (cell(row, col_function) or "").upper()
         function = UNIT_KIND_CODE_TO_FUNCTION.get(unit_kind_code)
         if unit_kind_code and function is None:
             result.errors.append(f"第 {idx} 列:單位種類代碼「{unit_kind_code}」無法辨識(應為 G/M/R/S),已忽略此欄位")
 
         dept = by_code.get(code)
         if dept is None:
-            # 匯入格式沒有攜帶「類型」欄位,新建的預算單位一律先歸類為成本中心,
+            # 匯入格式沒有攜帶「類型」欄位,新建的部門/成本中心一律先歸類為成本中心,
             # 若需要公司/事業處層級,請在畫面上手動調整類型。
             dept = Department(code=code, name=name, kind=DeptKind.cost_center)
             by_code[code] = dept
@@ -171,21 +254,31 @@ async def import_departments(
         else:
             result.updated += 1
         dept.name = name
-        dept.name_zh_hans = name_zh_hans
-        dept.name_en = name_en
+        dept.name_zh_hans = cell(row, col_name_hans)
+        dept.name_en = cell(row, col_name_en)
+        dept.manager = cell(row, col_manager)
         dept.function = function
-        dept.parent_id = None  # 上層單位於第二輪依代碼設定;留白代表最上層,先重置避免沿用舊值
+        dept.effective_date = _extract_date(raw_cell(row, col_effective_date))
+        dept.parent_id = None  # 上層單位於後續依代碼/名稱設定;留白代表最上層,先重置避免沿用舊值
         db.add(dept)
+        by_name.setdefault(name, dept)
+
+        parent_code = cell(row, col_parent_code)
+        parent_name = cell(row, col_parent_name)
         if parent_code:
             parent_codes[code] = parent_code
+        elif parent_name and parent_name != name:
+            parent_group = get_or_create_parent_by_name(parent_name)
+            dept.parent_id = parent_group.id
+            db.add(dept)
 
     db.flush()
 
-    # 第二輪:所有代碼都已存在,才能安全設定上層單位
+    # 第二輪:所有代碼都已存在,才能安全依「上層單位代碼」設定上層(部門名稱那一種已在第一輪處理)
     for code, parent_code in parent_codes.items():
         parent = by_code.get(parent_code)
         if parent is None:
-            result.errors.append(f"預算單位 {code}:上層單位代碼「{parent_code}」不存在,已忽略此欄位")
+            result.errors.append(f"部門 {code}:上層單位代碼「{parent_code}」不存在,已忽略此欄位")
             continue
         by_code[code].parent_id = parent.id
         db.add(by_code[code])

@@ -17,6 +17,7 @@ const emptyForm = {
   parent_id: "" as number | "",
   manager: "",
   function: "" as ExpenseFunction | "",
+  effective_date: "",
   sort_order: 0,
   is_active: true,
 };
@@ -57,6 +58,7 @@ export default function DepartmentsTab() {
       parent_id: dept.parent_id ?? "",
       manager: dept.manager ?? "",
       function: dept.function ?? "",
+      effective_date: dept.effective_date ?? "",
       sort_order: dept.sort_order,
       is_active: dept.is_active,
     });
@@ -75,6 +77,7 @@ export default function DepartmentsTab() {
       parent_id: form.parent_id === "" ? null : Number(form.parent_id),
       manager: form.manager || null,
       function: form.function || null,
+      effective_date: form.effective_date || null,
       sort_order: form.sort_order,
       is_active: form.is_active,
     };
@@ -214,6 +217,14 @@ export default function DepartmentsTab() {
           <label>
             主管
             <input value={form.manager} onChange={(e) => setForm({ ...form, manager: e.target.value })} />
+          </label>
+          <label>
+            生效日期
+            <input
+              type="date"
+              value={form.effective_date}
+              onChange={(e) => setForm({ ...form, effective_date: e.target.value })}
+            />
           </label>
           <label>
             作業功能別(費用預算科目對應用)

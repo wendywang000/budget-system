@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import enum
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
@@ -104,6 +105,7 @@ class Department(Base):
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("departments.id"), index=True)
     manager: Mapped[str | None] = mapped_column(String(50))
     function: Mapped[ExpenseFunction | None] = mapped_column(Enum(ExpenseFunction))
+    effective_date: Mapped[date | None] = mapped_column(Date)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 

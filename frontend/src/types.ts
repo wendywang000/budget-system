@@ -69,6 +69,7 @@ export interface Department {
   parent_id: number | null;
   manager: string | null;
   function: ExpenseFunction | null;
+  effective_date: string | null;
   sort_order: number;
   is_active: boolean;
   level: number;

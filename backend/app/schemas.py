@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -79,6 +79,7 @@ class DepartmentBase(BaseModel):
     parent_id: int | None = None
     manager: str | None = None
     function: ExpenseFunction | None = None
+    effective_date: date | None = None
     sort_order: int = 0
     is_active: bool = True
 
@@ -96,6 +97,7 @@ class DepartmentUpdate(BaseModel):
     parent_id: int | None = None
     manager: str | None = None
     function: ExpenseFunction | None = None
+    effective_date: date | None = None
     sort_order: int | None = None
     is_active: bool | None = None
 
