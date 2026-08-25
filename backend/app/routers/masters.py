@@ -11,9 +11,15 @@ from ..deps import accessible_department_ids, get_current_user, require_admin
 from ..models import (
     Account,
     Actual,
+    AssetCategory,
     BudgetEntry,
     BudgetVersion,
+    CapexItem,
+    Customer,
     Department,
+    Product,
+    SalesBudgetEntry,
+    Salesperson,
     Submission,
     User,
     VersionStatus,
@@ -22,9 +28,21 @@ from ..schemas import (
     AccountCreate,
     AccountOut,
     AccountUpdate,
+    AssetCategoryCreate,
+    AssetCategoryOut,
+    AssetCategoryUpdate,
+    CustomerCreate,
+    CustomerOut,
+    CustomerUpdate,
     DepartmentCreate,
     DepartmentOut,
     DepartmentUpdate,
+    ProductCreate,
+    ProductOut,
+    ProductUpdate,
+    SalespersonCreate,
+    SalespersonOut,
+    SalespersonUpdate,
     VersionCreate,
     VersionOut,
     VersionUpdate,
@@ -304,6 +322,8 @@ def delete_version(
         raise HTTPException(status.HTTP_409_CONFLICT, "已鎖定的版本不可刪除,請先解除鎖定")
     db.query(BudgetEntry).filter(BudgetEntry.version_id == version_id).delete()
     db.query(Submission).filter(Submission.version_id == version_id).delete()
+    db.query(SalesBudgetEntry).filter(SalesBudgetEntry.version_id == version_id).delete()
+    db.query(CapexItem).filter(CapexItem.version_id == version_id).delete()
     db.delete(version)
     db.commit()
 
@@ -315,3 +335,310 @@ def _clear_other_defaults(db: Session, keep_id: int) -> None:
     for other in others:
         other.is_default = False
         db.add(other)
+
+
+# --------------------------------------------------------------------------- #
+# 產品主檔
+# --------------------------------------------------------------------------- #
+@router.get("/products", response_model=list[ProductOut], summary="產品清單")
+def list_products(
+    active_only: bool = True,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[ProductOut]:
+    stmt = select(Product).order_by(Product.code)
+    if active_only:
+        stmt = stmt.where(Product.is_active.is_(True))
+    return [ProductOut.model_validate(p) for p in db.scalars(stmt)]
+
+
+@router.post("/products", response_model=ProductOut, status_code=201, summary="新增產品")
+def create_product(
+    payload: ProductCreate,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> ProductOut:
+    if db.scalar(select(Product).where(Product.code == payload.code)):
+        raise HTTPException(status.HTTP_409_CONFLICT, "產品代號已存在")
+    product = Product(**payload.model_dump())
+    db.add(product)
+    db.commit()
+    db.refresh(product)
+    return ProductOut.model_validate(product)
+
+
+@router.patch("/products/{product_id}", response_model=ProductOut, summary="修改產品")
+def update_product(
+    product_id: int,
+    payload: ProductUpdate,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> ProductOut:
+    product = db.get(Product, product_id)
+    if product is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "產品不存在")
+    data = payload.model_dump(exclude_unset=True)
+    if "code" in data and data["code"] != product.code:
+        if db.scalar(select(Product).where(Product.code == data["code"])):
+            raise HTTPException(status.HTTP_409_CONFLICT, "產品代號已存在")
+    for field, value in data.items():
+        setattr(product, field, value)
+    db.add(product)
+    db.commit()
+    db.refresh(product)
+    return ProductOut.model_validate(product)
+
+
+@router.delete("/products/{product_id}", status_code=204, response_model=None, summary="刪除產品")
+def delete_product(
+    product_id: int,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> None:
+    product = db.get(Product, product_id)
+    if product is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "產品不存在")
+    used = db.scalar(
+        select(func.count()).select_from(SalesBudgetEntry).where(SalesBudgetEntry.product_id == product_id)
+    )
+    if used:
+        raise HTTPException(status.HTTP_409_CONFLICT, "此產品已有銷售量預算資料,請改為停用")
+    db.delete(product)
+    db.commit()
+
+
+# --------------------------------------------------------------------------- #
+# 客戶主檔
+# --------------------------------------------------------------------------- #
+@router.get("/customers", response_model=list[CustomerOut], summary="客戶清單")
+def list_customers(
+    active_only: bool = True,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[CustomerOut]:
+    stmt = select(Customer).order_by(Customer.code)
+    if active_only:
+        stmt = stmt.where(Customer.is_active.is_(True))
+    return [CustomerOut.model_validate(c) for c in db.scalars(stmt)]
+
+
+@router.post("/customers", response_model=CustomerOut, status_code=201, summary="新增客戶")
+def create_customer(
+    payload: CustomerCreate,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> CustomerOut:
+    if db.scalar(select(Customer).where(Customer.code == payload.code)):
+        raise HTTPException(status.HTTP_409_CONFLICT, "客戶代號已存在")
+    customer = Customer(**payload.model_dump())
+    db.add(customer)
+    db.commit()
+    db.refresh(customer)
+    return CustomerOut.model_validate(customer)
+
+
+@router.patch("/customers/{customer_id}", response_model=CustomerOut, summary="修改客戶")
+def update_customer(
+    customer_id: int,
+    payload: CustomerUpdate,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> CustomerOut:
+    customer = db.get(Customer, customer_id)
+    if customer is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "客戶不存在")
+    data = payload.model_dump(exclude_unset=True)
+    if "code" in data and data["code"] != customer.code:
+        if db.scalar(select(Customer).where(Customer.code == data["code"])):
+            raise HTTPException(status.HTTP_409_CONFLICT, "客戶代號已存在")
+    for field, value in data.items():
+        setattr(customer, field, value)
+    db.add(customer)
+    db.commit()
+    db.refresh(customer)
+    return CustomerOut.model_validate(customer)
+
+
+@router.delete("/customers/{customer_id}", status_code=204, response_model=None, summary="刪除客戶")
+def delete_customer(
+    customer_id: int,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> None:
+    customer = db.get(Customer, customer_id)
+    if customer is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "客戶不存在")
+    used = db.scalar(
+        select(func.count()).select_from(SalesBudgetEntry).where(SalesBudgetEntry.customer_id == customer_id)
+    )
+    if used:
+        raise HTTPException(status.HTTP_409_CONFLICT, "此客戶已有銷售量預算資料,請改為停用")
+    db.delete(customer)
+    db.commit()
+
+
+# --------------------------------------------------------------------------- #
+# 銷售人員主檔
+# --------------------------------------------------------------------------- #
+def _salesperson_out(sp: Salesperson) -> SalespersonOut:
+    return SalespersonOut(
+        id=sp.id,
+        code=sp.code,
+        name=sp.name,
+        department_id=sp.department_id,
+        is_active=sp.is_active,
+        department_name=sp.department.name if sp.department else None,
+    )
+
+
+@router.get("/salespeople", response_model=list[SalespersonOut], summary="銷售人員清單")
+def list_salespeople(
+    active_only: bool = True,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[SalespersonOut]:
+    stmt = select(Salesperson).order_by(Salesperson.code)
+    if active_only:
+        stmt = stmt.where(Salesperson.is_active.is_(True))
+    return [_salesperson_out(sp) for sp in db.scalars(stmt)]
+
+
+@router.post("/salespeople", response_model=SalespersonOut, status_code=201, summary="新增銷售人員")
+def create_salesperson(
+    payload: SalespersonCreate,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> SalespersonOut:
+    if db.scalar(select(Salesperson).where(Salesperson.code == payload.code)):
+        raise HTTPException(status.HTTP_409_CONFLICT, "銷售人員代號已存在")
+    if db.get(Department, payload.department_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "預算單位(部門)不存在")
+    sp = Salesperson(**payload.model_dump())
+    db.add(sp)
+    db.commit()
+    db.refresh(sp)
+    return _salesperson_out(sp)
+
+
+@router.patch("/salespeople/{salesperson_id}", response_model=SalespersonOut, summary="修改銷售人員")
+def update_salesperson(
+    salesperson_id: int,
+    payload: SalespersonUpdate,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> SalespersonOut:
+    sp = db.get(Salesperson, salesperson_id)
+    if sp is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "銷售人員不存在")
+    data = payload.model_dump(exclude_unset=True)
+    if "code" in data and data["code"] != sp.code:
+        if db.scalar(select(Salesperson).where(Salesperson.code == data["code"])):
+            raise HTTPException(status.HTTP_409_CONFLICT, "銷售人員代號已存在")
+    if "department_id" in data and db.get(Department, data["department_id"]) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "預算單位(部門)不存在")
+    for field, value in data.items():
+        setattr(sp, field, value)
+    db.add(sp)
+    db.commit()
+    db.refresh(sp)
+    return _salesperson_out(sp)
+
+
+@router.delete("/salespeople/{salesperson_id}", status_code=204, response_model=None, summary="刪除銷售人員")
+def delete_salesperson(
+    salesperson_id: int,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> None:
+    sp = db.get(Salesperson, salesperson_id)
+    if sp is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "銷售人員不存在")
+    used = db.scalar(
+        select(func.count()).select_from(SalesBudgetEntry).where(SalesBudgetEntry.salesperson_id == salesperson_id)
+    )
+    if used:
+        raise HTTPException(status.HTTP_409_CONFLICT, "此銷售人員已有銷售量預算資料,請改為停用")
+    db.delete(sp)
+    db.commit()
+
+
+# --------------------------------------------------------------------------- #
+# 資產類別主檔
+# --------------------------------------------------------------------------- #
+def _asset_category_out(cat: AssetCategory) -> AssetCategoryOut:
+    return AssetCategoryOut(
+        id=cat.id,
+        code=cat.code,
+        name=cat.name,
+        depreciation_months=cat.depreciation_months,
+        asset_account_id=cat.asset_account_id,
+        expense_account_id=cat.expense_account_id,
+        is_active=cat.is_active,
+        asset_account_code=cat.asset_account.code if cat.asset_account else None,
+        expense_account_code=cat.expense_account.code if cat.expense_account else None,
+    )
+
+
+@router.get("/asset-categories", response_model=list[AssetCategoryOut], summary="資產類別清單")
+def list_asset_categories(
+    active_only: bool = True,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[AssetCategoryOut]:
+    stmt = select(AssetCategory).order_by(AssetCategory.code)
+    if active_only:
+        stmt = stmt.where(AssetCategory.is_active.is_(True))
+    return [_asset_category_out(c) for c in db.scalars(stmt)]
+
+
+@router.post("/asset-categories", response_model=AssetCategoryOut, status_code=201, summary="新增資產類別")
+def create_asset_category(
+    payload: AssetCategoryCreate,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AssetCategoryOut:
+    if db.scalar(select(AssetCategory).where(AssetCategory.code == payload.code)):
+        raise HTTPException(status.HTTP_409_CONFLICT, "資產類別代號已存在")
+    cat = AssetCategory(**payload.model_dump())
+    db.add(cat)
+    db.commit()
+    db.refresh(cat)
+    return _asset_category_out(cat)
+
+
+@router.patch("/asset-categories/{category_id}", response_model=AssetCategoryOut, summary="修改資產類別")
+def update_asset_category(
+    category_id: int,
+    payload: AssetCategoryUpdate,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AssetCategoryOut:
+    cat = db.get(AssetCategory, category_id)
+    if cat is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "資產類別不存在")
+    data = payload.model_dump(exclude_unset=True)
+    if "code" in data and data["code"] != cat.code:
+        if db.scalar(select(AssetCategory).where(AssetCategory.code == data["code"])):
+            raise HTTPException(status.HTTP_409_CONFLICT, "資產類別代號已存在")
+    for field, value in data.items():
+        setattr(cat, field, value)
+    db.add(cat)
+    db.commit()
+    db.refresh(cat)
+    return _asset_category_out(cat)
+
+
+@router.delete("/asset-categories/{category_id}", status_code=204, response_model=None, summary="刪除資產類別")
+def delete_asset_category(
+    category_id: int,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> None:
+    cat = db.get(AssetCategory, category_id)
+    if cat is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "資產類別不存在")
+    used = db.scalar(select(func.count()).select_from(CapexItem).where(CapexItem.asset_category_id == category_id))
+    if used:
+        raise HTTPException(status.HTTP_409_CONFLICT, "此資產類別已有資本支出資料,請改為停用")
+    db.delete(cat)
+    db.commit()

@@ -3,6 +3,23 @@ export type DeptKind = "company" | "division" | "department" | "cost_center" | "
 export type AccountCategory = "revenue" | "cost" | "expense" | "capex";
 export type VersionStatus = "draft" | "open" | "locked";
 export type SubmissionStatus = "draft" | "submitted" | "returned" | "approved";
+export type ExpenseFunction = "sales" | "admin" | "rd" | "manufacturing";
+export type GrantModule = "budget" | "sales" | "expense" | "capex" | "report";
+
+export const FUNCTION_LABELS: Record<ExpenseFunction, string> = {
+  sales: "銷",
+  admin: "管",
+  rd: "研",
+  manufacturing: "製",
+};
+
+export const MODULE_LABELS: Record<GrantModule, string> = {
+  budget: "科目預算表",
+  sales: "銷售量預算",
+  expense: "費用預算",
+  capex: "資本支出",
+  report: "報表查詢",
+};
 
 export const CATEGORY_LABELS: Record<AccountCategory, string> = {
   revenue: "營業收入",
@@ -49,6 +66,7 @@ export interface Department {
   kind: DeptKind;
   parent_id: number | null;
   manager: string | null;
+  function: ExpenseFunction | null;
   sort_order: number;
   is_active: boolean;
   level: number;
@@ -165,4 +183,163 @@ export interface ImportResult {
   updated: number;
   skipped: number;
   errors: string[];
+}
+
+export interface Product {
+  id: number;
+  code: string;
+  name: string;
+  category: string | null;
+  unit: string;
+  unit_price: number;
+  unit_cost: number;
+  revenue_account_id: number | null;
+  is_active: boolean;
+}
+
+export interface Customer {
+  id: number;
+  code: string;
+  name: string;
+  region: string | null;
+  sales_rep: string | null;
+  is_active: boolean;
+}
+
+export interface Salesperson {
+  id: number;
+  code: string;
+  name: string;
+  department_id: number;
+  department_name: string | null;
+  is_active: boolean;
+}
+
+export interface SalesBudgetMonthCell {
+  quantity: number;
+  amount: number;
+}
+
+export interface SalesBudgetCellOut {
+  customer_id: number;
+  customer_code: string;
+  customer_name: string;
+  product_id: number;
+  product_code: string;
+  product_name: string;
+  unit: string;
+  currency: string;
+  months: Record<number, SalesBudgetMonthCell>;
+  total_quantity: number;
+  total_amount: number;
+  note: string | null;
+}
+
+export interface SalesBudgetGridResponse {
+  version: BudgetVersion;
+  department: Department | null;
+  salesperson: Salesperson;
+  editable: boolean;
+  rows: SalesBudgetCellOut[];
+  month_totals: Record<number, number>;
+  grand_total: number;
+}
+
+export type CapexStatus = "draft" | "submitted" | "returned" | "approved";
+
+export const CAPEX_STATUS_LABELS: Record<CapexStatus, string> = {
+  draft: "編列中",
+  submitted: "已送出",
+  returned: "已退回",
+  approved: "已核定",
+};
+
+export interface AssetCategory {
+  id: number;
+  code: string;
+  name: string;
+  depreciation_months: number;
+  asset_account_id: number | null;
+  expense_account_id: number | null;
+  asset_account_code: string | null;
+  expense_account_code: string | null;
+  is_active: boolean;
+}
+
+export interface CapexItem {
+  id: number;
+  version_id: number;
+  department_id: number;
+  department_name: string | null;
+  asset_category_id: number;
+  asset_category_name: string | null;
+  name: string;
+  acquisition_cost: number;
+  acquisition_yyyymm: number;
+  depreciation_start_yyyymm: number | null;
+  depreciation_months: number | null;
+  justification: string | null;
+  status: CapexStatus;
+  expense_account_id: number | null;
+  expense_account_code: string | null;
+  expense_account_name: string | null;
+  monthly_depreciation: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ExpenseFormatColumn {
+  id: number;
+  key: string;
+  label: string;
+  sort_order: number;
+}
+
+export interface ExpenseFormatAccountMap {
+  function: ExpenseFunction;
+  account_id: number;
+  account_code: string | null;
+  account_name: string | null;
+}
+
+export interface ExpenseFormat {
+  id: number;
+  code: string;
+  name: string;
+  sort_order: number;
+  is_active: boolean;
+  columns: ExpenseFormatColumn[];
+  account_maps: ExpenseFormatAccountMap[];
+}
+
+export interface ExpenseGridCell {
+  column_key: string;
+  column_label: string;
+  months: Record<number, number>;
+  total: number;
+}
+
+export interface ExpenseGridResponse {
+  version: BudgetVersion;
+  department: Department;
+  format: ExpenseFormat;
+  editable: boolean;
+  rows: ExpenseGridCell[];
+  month_totals: Record<number, number>;
+  grand_total: number;
+  resolved_account: ExpenseFormatAccountMap | null;
+}
+
+export interface AccessGrant {
+  id: number;
+  user_id: number;
+  user_name: string | null;
+  module: GrantModule;
+  department_id: number;
+  department_name: string | null;
+  salesperson_id: number | null;
+  salesperson_name: string | null;
+  expense_format_id: number | null;
+  expense_format_name: string | null;
+  created_at: string;
 }

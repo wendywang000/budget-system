@@ -13,6 +13,15 @@ export default function Layout() {
           <NavLink to="/grid" className={navClass}>
             預算填報
           </NavLink>
+          <NavLink to="/sales-budget" className={navClass}>
+            銷售量預算
+          </NavLink>
+          <NavLink to="/capex" className={navClass}>
+            資本支出
+          </NavLink>
+          <NavLink to="/expense-budget" className={navClass}>
+            費用預算
+          </NavLink>
           {isAdmin && (
             <NavLink to="/submissions" className={navClass}>
               填報進度

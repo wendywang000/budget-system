@@ -444,3 +444,35 @@ tfoot td {
   color: var(--color-danger);
   font-size: 13px;
 }
+
+.masters-form h4 {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--color-muted);
+}
+
+.column-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.column-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.column-row input {
+  flex: 1;
+}
+
+.cell-input.narrow {
+  width: 70px;
+}
+
+.sales-budget-grid .sub-head {
+  font-size: 11px;
+  color: var(--color-muted);
+  font-weight: 500;
+}

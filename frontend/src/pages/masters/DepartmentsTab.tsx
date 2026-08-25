@@ -1,9 +1,10 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api, apiErrorMessage } from "../../api/client";
-import type { Department, DeptKind } from "../../types";
-import { DEPT_KIND_LABELS } from "../../types";
+import type { Department, DeptKind, ExpenseFunction } from "../../types";
+import { DEPT_KIND_LABELS, FUNCTION_LABELS } from "../../types";
 
 const KIND_OPTIONS: DeptKind[] = ["company", "division", "department", "cost_center", "project"];
+const FUNCTION_OPTIONS: ExpenseFunction[] = ["sales", "admin", "rd", "manufacturing"];
 
 const emptyForm = {
   id: null as number | null,
@@ -12,6 +13,7 @@ const emptyForm = {
   kind: "department" as DeptKind,
   parent_id: "" as number | "",
   manager: "",
+  function: "" as ExpenseFunction | "",
   sort_order: 0,
   is_active: true,
 };
@@ -47,6 +49,7 @@ export default function DepartmentsTab() {
       kind: dept.kind,
       parent_id: dept.parent_id ?? "",
       manager: dept.manager ?? "",
+      function: dept.function ?? "",
       sort_order: dept.sort_order,
       is_active: dept.is_active,
     });
@@ -62,6 +65,7 @@ export default function DepartmentsTab() {
       kind: form.kind,
       parent_id: form.parent_id === "" ? null : Number(form.parent_id),
       manager: form.manager || null,
+      function: form.function || null,
       sort_order: form.sort_order,
       is_active: form.is_active,
     };
@@ -136,6 +140,20 @@ export default function DepartmentsTab() {
             <input value={form.manager} onChange={(e) => setForm({ ...form, manager: e.target.value })} />
           </label>
           <label>
+            作業功能別(費用預算科目對應用)
+            <select
+              value={form.function}
+              onChange={(e) => setForm({ ...form, function: e.target.value as ExpenseFunction | "" })}
+            >
+              <option value="">（未設定）</option>
+              {FUNCTION_OPTIONS.map((f) => (
+                <option key={f} value={f}>
+                  {FUNCTION_LABELS[f]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
             排序
             <input
               type="number"
@@ -174,6 +192,7 @@ export default function DepartmentsTab() {
               <th>名稱</th>
               <th>類型</th>
               <th>主管</th>
+              <th>功能別</th>
               <th>狀態</th>
               <th>操作</th>
             </tr>
@@ -185,6 +204,7 @@ export default function DepartmentsTab() {
                 <td style={{ paddingLeft: `${d.level * 16}px` }}>{d.name}</td>
                 <td>{DEPT_KIND_LABELS[d.kind]}</td>
                 <td>{d.manager ?? ""}</td>
+                <td>{d.function ? FUNCTION_LABELS[d.function] : ""}</td>
                 <td>{d.is_active ? "啟用" : "停用"}</td>
                 <td className="action-cell">
                   <button onClick={() => startEdit(d)}>編輯</button>

@@ -9,6 +9,9 @@ import SummaryReportPage from "./pages/SummaryReportPage";
 import VarianceReportPage from "./pages/VarianceReportPage";
 import MastersPage from "./pages/MastersPage";
 import UsersPage from "./pages/UsersPage";
+import SalesBudgetPage from "./pages/SalesBudgetPage";
+import CapexPage from "./pages/CapexPage";
+import ExpenseBudgetPage from "./pages/ExpenseBudgetPage";
 
 export default function App() {
   return (
@@ -20,6 +23,9 @@ export default function App() {
             <Route element={<Layout />}>
               <Route path="/" element={<Navigate to="/grid" replace />} />
               <Route path="/grid" element={<BudgetGridPage />} />
+              <Route path="/sales-budget" element={<SalesBudgetPage />} />
+              <Route path="/capex" element={<CapexPage />} />
+              <Route path="/expense-budget" element={<ExpenseBudgetPage />} />
               <Route path="/reports/summary" element={<SummaryReportPage />} />
               <Route path="/reports/variance" element={<VarianceReportPage />} />
               <Route element={<AdminRoute />}>

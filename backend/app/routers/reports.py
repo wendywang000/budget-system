@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import accessible_department_ids, get_current_user
-from ..models import Actual, BudgetEntry, BudgetVersion, User
+from ..models import Actual, BudgetEntry, BudgetVersion, GrantModule, User
 from ..schemas import (
     SummaryResponse,
     SummaryRow,
@@ -40,10 +40,18 @@ def get_version(db: Session, version_id: int) -> BudgetVersion:
 
 
 def department_scope(db: Session, user: User, department_id: int | None) -> set[int] | None:
-    """回傳報表要納入的部門 id;None 表示全部。"""
+    """回傳報表要納入的部門 id;None 表示全部。
+
+    可查詢的部門 = budget 模組(自己填報的部門)與 report 模組(額外被授予的報表查詢部門)的聯集。
+    """
     from ..services.tree import descendant_department_ids
 
-    allowed = accessible_department_ids(db, user)
+    budget_scope = accessible_department_ids(db, user, GrantModule.budget)
+    report_scope = accessible_department_ids(db, user, GrantModule.report)
+    if budget_scope is None or report_scope is None:
+        allowed = None
+    else:
+        allowed = budget_scope | report_scope
     if department_id is None:
         return allowed
     subtree = descendant_department_ids(db, department_id)

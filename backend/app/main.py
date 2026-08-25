@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import Base, engine
-from .routers import auth, budget, excel, masters, reports
+from .routers import auth, budget, capex, excel, expense, masters, permissions, reports, sales
 
 Base.metadata.create_all(bind=engine)
 
@@ -24,6 +24,10 @@ app.include_router(masters.router, prefix=settings.api_prefix)
 app.include_router(budget.router, prefix=settings.api_prefix)
 app.include_router(reports.router, prefix=settings.api_prefix)
 app.include_router(excel.router, prefix=settings.api_prefix)
+app.include_router(sales.router, prefix=settings.api_prefix)
+app.include_router(capex.router, prefix=settings.api_prefix)
+app.include_router(expense.router, prefix=settings.api_prefix)
+app.include_router(permissions.router, prefix=settings.api_prefix)
 
 
 @app.get("/api/health", tags=["系統"], summary="健康檢查")
