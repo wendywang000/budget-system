@@ -22,6 +22,8 @@ from ..models import (
     BudgetEntry,
     BudgetVersion,
     Department,
+    DeptKind,
+    ExpenseFunction,
     User,
     VersionStatus,
 )
@@ -34,6 +36,23 @@ MONTHS = tuple(range(1, 13))
 MONTH_HEADERS = [f"{m}月" for m in MONTHS]
 HEADER_FILL = PatternFill(start_color="FFDCE6F1", end_color="FFDCE6F1", fill_type="solid")
 HEADER_FONT = Font(bold=True)
+
+KIND_LABELS: dict[DeptKind, str] = {
+    DeptKind.company: "公司",
+    DeptKind.division: "事業處",
+    DeptKind.department: "部門",
+    DeptKind.cost_center: "成本中心",
+    DeptKind.project: "專案",
+}
+KIND_LABELS_REVERSE = {v: k for k, v in KIND_LABELS.items()}
+
+FUNCTION_LABELS: dict[ExpenseFunction, str] = {
+    ExpenseFunction.sales: "銷",
+    ExpenseFunction.admin: "管",
+    ExpenseFunction.rd: "研",
+    ExpenseFunction.manufacturing: "製",
+}
+FUNCTION_LABELS_REVERSE = {v: k for k, v in FUNCTION_LABELS.items()}
 
 
 def _xlsx_response(wb: Workbook, filename: str) -> StreamingResponse:
@@ -48,6 +67,145 @@ def _xlsx_response(wb: Workbook, filename: str) -> StreamingResponse:
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": disposition},
     )
+
+
+# --------------------------------------------------------------------------- #
+# 部門 / 成本中心主檔:範本 / 匯出 / 匯入
+# --------------------------------------------------------------------------- #
+DEPARTMENT_HEADERS = ["*部門代號", "*部門名稱", "*類型", "上層部門代號", "主管", "功能別(銷/管/研/製)", "排序", "啟用(是/否)"]
+
+
+def _department_workbook(departments: list[Department]) -> Workbook:
+    by_id = {d.id: d for d in departments}
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "部門主檔"
+    ws.append(DEPARTMENT_HEADERS)
+    for col in range(1, len(DEPARTMENT_HEADERS) + 1):
+        cell = ws.cell(row=1, column=col)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+
+    note_ws = wb.create_sheet("類型與功能別對照")
+    note_ws.append(["類型代碼", "說明"])
+    for label in KIND_LABELS.values():
+        note_ws.append([label, ""])
+    note_ws.append([])
+    note_ws.append(["功能別代碼", "說明"])
+    for label in FUNCTION_LABELS.values():
+        note_ws.append([label, ""])
+
+    for dept in sorted(departments, key=lambda d: (d.sort_order, d.code)):
+        parent = by_id.get(dept.parent_id) if dept.parent_id else None
+        ws.append(
+            [
+                dept.code,
+                dept.name,
+                KIND_LABELS[dept.kind],
+                parent.code if parent else "",
+                dept.manager or "",
+                FUNCTION_LABELS.get(dept.function, "") if dept.function else "",
+                dept.sort_order,
+                "是" if dept.is_active else "否",
+            ]
+        )
+
+    for idx in range(1, len(DEPARTMENT_HEADERS) + 1):
+        ws.column_dimensions[get_column_letter(idx)].width = 16
+    return wb
+
+
+@router.get("/departments/template", summary="下載部門主檔匯入範本")
+def download_department_template(_: User = Depends(require_admin)) -> StreamingResponse:
+    return _xlsx_response(_department_workbook([]), "departments_template.xlsx")
+
+
+@router.get("/departments/export", summary="匯出部門主檔")
+def export_departments(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> StreamingResponse:
+    departments = db.scalars(select(Department)).all()
+    return _xlsx_response(_department_workbook(departments), "departments.xlsx")
+
+
+@router.post("/departments/import", response_model=ImportResult, summary="匯入部門主檔(依部門代號覆蓋,可用上層部門代號建立組織樹)")
+async def import_departments(
+    file: UploadFile,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> ImportResult:
+    content = await file.read()
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"無法讀取 Excel 檔案:{exc}") from exc
+    ws = wb.active
+
+    result = ImportResult()
+    rows = list(ws.iter_rows(min_row=2, values_only=True))
+    by_code = {d.code: d for d in db.scalars(select(Department))}
+
+    # 第一輪:建立/更新每個部門(不設定上層,避免匯入順序影響),先確保所有代號都存在
+    parent_codes: dict[str, str] = {}
+    for idx, row in enumerate(rows, start=2):
+        if not row or row[0] is None:
+            continue
+        code = str(row[0]).strip()
+        name = str(row[1]).strip() if row[1] is not None else ""
+        kind_label = str(row[2]).strip() if row[2] is not None else ""
+        parent_code = str(row[3]).strip() if len(row) > 3 and row[3] not in (None, "") else ""
+        manager = str(row[4]).strip() if len(row) > 4 and row[4] not in (None, "") else None
+        function_label = str(row[5]).strip() if len(row) > 5 and row[5] not in (None, "") else ""
+        sort_order = row[6] if len(row) > 6 and row[6] not in (None, "") else 0
+        is_active_label = str(row[7]).strip() if len(row) > 7 and row[7] not in (None, "") else "是"
+
+        if not code or not name:
+            result.skipped += 1
+            result.errors.append(f"第 {idx} 列:部門代號或名稱空白,已略過")
+            continue
+        kind = KIND_LABELS_REVERSE.get(kind_label)
+        if kind is None:
+            result.skipped += 1
+            result.errors.append(f"第 {idx} 列:類型「{kind_label}」無法辨識,已略過")
+            continue
+        function = FUNCTION_LABELS_REVERSE.get(function_label) if function_label else None
+        if function_label and function is None:
+            result.errors.append(f"第 {idx} 列:功能別「{function_label}」無法辨識,已忽略此欄位")
+
+        try:
+            sort_order_int = int(sort_order)
+        except (TypeError, ValueError):
+            sort_order_int = 0
+
+        dept = by_code.get(code)
+        if dept is None:
+            dept = Department(code=code, name=name, kind=kind)
+            by_code[code] = dept
+            result.inserted += 1
+        else:
+            result.updated += 1
+        dept.name = name
+        dept.kind = kind
+        dept.manager = manager
+        dept.function = function
+        dept.sort_order = sort_order_int
+        dept.is_active = is_active_label not in ("否", "false", "False", "0")
+        dept.parent_id = None  # 上層部門於第二輪依代號設定;留白代表最上層,先重置避免沿用舊值
+        db.add(dept)
+        if parent_code:
+            parent_codes[code] = parent_code
+
+    db.flush()
+
+    # 第二輪:所有代號都已存在,才能安全設定上層部門
+    for code, parent_code in parent_codes.items():
+        parent = by_code.get(parent_code)
+        if parent is None:
+            result.errors.append(f"部門 {code}:上層部門代號「{parent_code}」不存在,已忽略此欄位")
+            continue
+        by_code[code].parent_id = parent.id
+        db.add(by_code[code])
+
+    db.commit()
+    return result
 
 
 # --------------------------------------------------------------------------- #
