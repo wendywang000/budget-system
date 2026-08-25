@@ -11,12 +11,14 @@ from ..deps import accessible_department_ids, get_current_user, require_admin
 from ..models import (
     Account,
     Actual,
+    AccessGrant,
     AssetCategory,
     BudgetEntry,
     BudgetVersion,
     CapexItem,
     Customer,
     Department,
+    ExpenseEntry,
     Product,
     SalesBudgetEntry,
     Salesperson,
@@ -134,11 +136,21 @@ def delete_department(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "部門不存在")
     if db.scalar(select(func.count()).select_from(Department).where(Department.parent_id == dept_id)):
         raise HTTPException(status.HTTP_409_CONFLICT, "此部門仍有下層部門,無法刪除")
-    used = db.scalar(select(func.count()).select_from(BudgetEntry).where(BudgetEntry.department_id == dept_id))
-    used += db.scalar(select(func.count()).select_from(Actual).where(Actual.department_id == dept_id)) or 0
-    used += db.scalar(select(func.count()).select_from(User).where(User.department_id == dept_id)) or 0
-    if used:
-        raise HTTPException(status.HTTP_409_CONFLICT, "此部門已有預算/實際數/使用者,請改為停用")
+
+    dependent_tables = [
+        (BudgetEntry, "預算"),
+        (Actual, "實際數"),
+        (User, "使用者"),
+        (AccessGrant, "權限授予"),
+        (Salesperson, "銷售人員"),
+        (SalesBudgetEntry, "銷售量預算"),
+        (CapexItem, "資本支出項目"),
+        (ExpenseEntry, "費用預算"),
+    ]
+    for model, label in dependent_tables:
+        count = db.scalar(select(func.count()).select_from(model).where(model.department_id == dept_id))
+        if count:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"此部門已有{label}資料,請改為停用")
     db.delete(dept)
     db.commit()
 
