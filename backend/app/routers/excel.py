@@ -12,19 +12,24 @@ from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import assert_department_access, get_current_user, require_admin
 from ..models import (
     Account,
+    AccountCategory,
+    AccountCategoryOption,
     Actual,
+    AssetCategory,
     BudgetEntry,
     BudgetVersion,
     Department,
     DeptKind,
+    ExpenseFormatAccountMap,
     ExpenseFunction,
+    Product,
     User,
     VersionStatus,
 )
@@ -282,6 +287,362 @@ async def import_departments(
             continue
         by_code[code].parent_id = parent.id
         db.add(by_code[code])
+
+    db.commit()
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# 會計科目主檔:範本 / 匯出 / 匯入
+# --------------------------------------------------------------------------- #
+ACCOUNT_HEADERS = [
+    "*會計科目代碼",
+    "*會計科目名稱",
+    "會計科目名稱(簡體中文)",
+    "會計科目名稱(英文)",
+    "會計科目類別",
+    "起始年月",
+    "結束年月",
+]
+
+CATEGORY_CODE_TO_ENUM: dict[str, AccountCategory] = {
+    "R": AccountCategory.revenue,
+    "C": AccountCategory.cost,
+    "E": AccountCategory.expense,
+    "K": AccountCategory.capex,
+    "revenue": AccountCategory.revenue,
+    "cost": AccountCategory.cost,
+    "expense": AccountCategory.expense,
+    "capex": AccountCategory.capex,
+    "收入": AccountCategory.revenue,
+    "營業收入": AccountCategory.revenue,
+    "成本": AccountCategory.cost,
+    "營業成本": AccountCategory.cost,
+    "費用": AccountCategory.expense,
+    "營業費用": AccountCategory.expense,
+    "資本支出": AccountCategory.capex,
+}
+
+CATEGORY_ENUM_TO_CODE = {v: k for k, v in CATEGORY_CODE_TO_ENUM.items() if isinstance(k, str) and len(k) == 1}
+ACCOUNT_CODE_HEADER_ALIASES = (
+    "*會計科目代碼",
+    "會計科目代碼",
+    "*科目代碼",
+    "科目代號",
+    "會計科目代號",
+    "會計科目代碼",
+    "*會計科目代號",
+    "代碼",
+)
+ACCOUNT_NAME_HEADER_ALIASES = (
+    "*會計科目名稱",
+    "會計科目名稱(繁體中文)",
+    "會計科目名稱",
+    "*科目名稱",
+    "科目名稱(繁體中文)",
+    "會計科目名稱(繁體)",
+    "會計科目名稱(繁中)",
+    "名稱",
+)
+ACCOUNT_NAME_HANS_HEADER_ALIASES = ("會計科目名稱(簡體中文)", "會計科目名稱(簡中)", "簡體中文名稱")
+ACCOUNT_NAME_EN_HEADER_ALIASES = ("會計科目名稱(英文)", "英文名稱")
+ACCOUNT_CATEGORY_HEADER_ALIASES = ("會計科目類別", "*類別", "科目類別", "類別", "科目類型")
+ACCOUNT_PARENT_CODE_HEADER_ALIASES = ("上層科目代碼", "上層代碼", "父科目代碼")
+ACCOUNT_PARENT_NAME_HEADER_ALIASES = ("上層科目名稱", "上層名稱", "父科目名稱", "父科目")
+ACCOUNT_POSTABLE_HEADER_ALIASES = ("可直接填報", "是否可填報", "葉科目", "是否可直接填報")
+ACCOUNT_SORT_HEADER_ALIASES = ("排序", "顯示順序")
+ACCOUNT_ACTIVE_HEADER_ALIASES = ("啟用", "是否啟用", "使用中")
+ACCOUNT_NOTE_HEADER_ALIASES = ("備註", "說明")
+ACCOUNT_START_DATE_HEADER_ALIASES = ("起始年月", "起始日期", "生效年月")
+ACCOUNT_END_DATE_HEADER_ALIASES = ("結束年月", "結束日期", "失效年月")
+
+
+def _header_matches(header: str, aliases: tuple[str, ...]) -> bool:
+    normalized = (header or "").strip()
+    if not normalized:
+        return False
+    for alias in aliases:
+        if normalized == alias:
+            return True
+        if alias in normalized or normalized in alias:
+            return True
+    return False
+
+
+def _account_workbook(accounts: list[Account]) -> Workbook:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "會計科目主檔"
+    ws.append(ACCOUNT_HEADERS)
+    for col in range(1, len(ACCOUNT_HEADERS) + 1):
+        cell = ws.cell(row=1, column=col)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+
+    for account in sorted(accounts, key=lambda a: (a.sort_order, a.code)):
+        category_code = {
+            AccountCategory.revenue: "4X",
+            AccountCategory.cost: "5X",
+            AccountCategory.expense: "6X",
+            AccountCategory.capex: "7X",
+        }.get(account.category, "1X")
+        ws.append(
+            [
+                account.code,
+                account.name,
+                account.name,
+                account.name,
+                category_code,
+                "200501",
+                "",
+            ]
+        )
+
+    for idx in range(1, len(ACCOUNT_HEADERS) + 1):
+        ws.column_dimensions[get_column_letter(idx)].width = 18
+    return wb
+
+
+def _find_column(headers: list[str], aliases: tuple[str, ...]) -> int | None:
+    for idx, header in enumerate(headers):
+        if header and _header_matches(header, aliases):
+            return idx
+    return None
+
+
+def _normalize_bool(value) -> bool:
+    if value is None:
+        return True
+    text = str(value).strip().lower()
+    if text in {"", "-", "null", "none"}:
+        return True
+    return text in {"1", "true", "y", "yes", "t", "on"}
+
+
+def _normalize_category_code(value: str) -> str | None:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return None
+    normalized = re.sub(r"[\s_]+", "", cleaned.lower())
+    for token in ("revenue", "cost", "expense", "capex"):
+        if normalized == token:
+            return token
+    return cleaned
+
+
+def _parse_account_category(value, *, existing_categories: dict[str, AccountCategoryOption] | None = None) -> str | None:
+    if value is None:
+        return None
+    raw_text = str(value).strip()
+    if not raw_text:
+        return None
+    text = raw_text.lower()
+    aliases = {
+        "revenue": "revenue",
+        "營業收入": "revenue",
+        "收入": "revenue",
+        "cost": "cost",
+        "營業成本": "cost",
+        "成本": "cost",
+        "expense": "expense",
+        "營業費用": "expense",
+        "費用": "expense",
+        "capex": "capex",
+        "資本支出": "capex",
+        "capital": "capex",
+        "固定資產": "capex",
+    }
+    if text in aliases:
+        return aliases[text]
+    if existing_categories:
+        for key, option in existing_categories.items():
+            if key and (raw_text.lower() == key.lower() or raw_text.lower() == option.name.lower()):
+                return option.code
+    raw = raw_text.upper()
+    if raw in {"R", "C", "E", "K"}:
+        return {"R": "revenue", "C": "cost", "E": "expense", "K": "capex"}[raw]
+    match = re.match(r"^(\d)X$", raw)
+    if match:
+        prefix = int(match.group(1))
+        if prefix == 4:
+            return "revenue"
+        if prefix == 5:
+            return "cost"
+        if prefix == 6:
+            return "expense"
+        if prefix == 7:
+            return "capex"
+        return "expense"
+    match = re.match(r"^(\d)([A-Z])$", raw)
+    if match:
+        prefix = int(match.group(1))
+        if prefix == 4:
+            return "revenue"
+        if prefix == 5:
+            return "cost"
+        if prefix == 6:
+            return "expense"
+        if prefix == 7:
+            return "capex"
+        return "expense"
+    return None
+
+
+@router.get("/accounts/template", summary="下載會計科目匯入範本")
+def download_account_template(_: User = Depends(require_admin)) -> StreamingResponse:
+    return _xlsx_response(_account_workbook([]), "accounts_template.xlsx")
+
+
+@router.get("/accounts/export", summary="匯出會計科目主檔")
+def export_accounts(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> StreamingResponse:
+    accounts = db.scalars(select(Account).order_by(Account.sort_order, Account.code)).all()
+    return _xlsx_response(_account_workbook(accounts), "accounts.xlsx")
+
+
+@router.post("/accounts/import", response_model=ImportResult, summary="匯入會計科目主檔(支援自家科目表與上層科目代碼/名稱)")
+async def import_accounts(
+    file: UploadFile,
+    replace: bool = Query(False, description="True 表示先停用未出現在檔案中的舊科目，再以新檔覆蓋現有主檔"),
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> ImportResult:
+    content = await file.read()
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"無法讀取 Excel 檔案:{exc}") from exc
+    ws = wb.active
+
+    result = ImportResult()
+    header_row = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    col_code = _find_column(header_row, ACCOUNT_CODE_HEADER_ALIASES)
+    col_name = _find_column(header_row, ACCOUNT_NAME_HEADER_ALIASES)
+    col_name_hans = _find_column(header_row, ACCOUNT_NAME_HANS_HEADER_ALIASES)
+    col_name_en = _find_column(header_row, ACCOUNT_NAME_EN_HEADER_ALIASES)
+    col_category = _find_column(header_row, ACCOUNT_CATEGORY_HEADER_ALIASES)
+    if col_code is None or col_name is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "找不到科目代碼或名稱欄位，請使用範本或與欄位名稱一致的檔案")
+
+    if col_category is None:
+        col_category = None
+
+    col_parent_code = _find_column(header_row, ACCOUNT_PARENT_CODE_HEADER_ALIASES)
+    col_parent_name = _find_column(header_row, ACCOUNT_PARENT_NAME_HEADER_ALIASES)
+    col_postable = _find_column(header_row, ACCOUNT_POSTABLE_HEADER_ALIASES)
+    col_sort = _find_column(header_row, ACCOUNT_SORT_HEADER_ALIASES)
+    col_active = _find_column(header_row, ACCOUNT_ACTIVE_HEADER_ALIASES)
+    col_note = _find_column(header_row, ACCOUNT_NOTE_HEADER_ALIASES)
+    col_start_date = _find_column(header_row, ACCOUNT_START_DATE_HEADER_ALIASES)
+    col_end_date = _find_column(header_row, ACCOUNT_END_DATE_HEADER_ALIASES)
+
+    def raw_cell(row: tuple, col: int | None):
+        if col is None or col >= len(row):
+            return None
+        return row[col]
+
+    def cell(row: tuple, col: int | None) -> str | None:
+        value = raw_cell(row, col)
+        return str(value).strip() if value is not None and str(value).strip() != "" else None
+
+    rows = list(ws.iter_rows(min_row=2, values_only=True))
+    all_accounts = db.scalars(select(Account)).all()
+    all_categories = db.scalars(select(AccountCategoryOption)).all()
+    category_lookup = {option.code: option for option in all_categories}
+    category_name_lookup = {option.name: option for option in all_categories}
+    category_lookup.update(category_name_lookup)
+    by_code = {a.code: a for a in all_accounts}
+    by_name = {a.name: a for a in all_accounts}
+    parent_map: dict[str, str] = {}
+    imported_codes: set[str] = set()
+
+    for idx, row in enumerate(rows, start=2):
+        if not row or all(v is None for v in row):
+            continue
+        code = cell(row, col_code)
+        name = cell(row, col_name)
+        if not code or not name:
+            result.skipped += 1
+            result.errors.append(f"第 {idx} 列:科目代碼或名稱空白,已略過")
+            continue
+        imported_codes.add(code)
+
+        raw_category = raw_cell(row, col_category) if col_category is not None else None
+        category = _parse_account_category(raw_category, existing_categories=category_lookup) if raw_category is not None else None
+        if category is None:
+            category = _parse_account_category(code, existing_categories=category_lookup) if code else None
+        if category is None:
+            category = "expense"
+        elif category not in category_lookup and category not in {"revenue", "cost", "expense", "capex"}:
+            option = AccountCategoryOption(code=category, name=raw_category.strip() if raw_category is not None else category, sort_order=0, is_active=True)
+            db.add(option)
+            category_lookup[option.code] = option
+            category_name_lookup[option.name] = option
+
+        account = by_code.get(code)
+        if account is None:
+            account = Account(code=code, category=category)
+            by_code[code] = account
+            result.inserted += 1
+        else:
+            result.updated += 1
+
+        account.name = name
+        account.category = category
+        account.is_postable = _normalize_bool(raw_cell(row, col_postable)) if col_postable is not None else True
+        try:
+            account.sort_order = int(str(raw_cell(row, col_sort)).strip()) if col_sort is not None and raw_cell(row, col_sort) not in (None, "") else 0
+        except ValueError:
+            account.sort_order = 0
+        account.is_active = _normalize_bool(raw_cell(row, col_active)) if col_active is not None else True
+        account.note = cell(row, col_note)
+        if col_name_hans is not None:
+            account.name = name
+        if col_name_en is not None:
+            account.note = f"{(cell(row, col_name_hans) or '')}|{(cell(row, col_name_en) or '')}|{account.note or ''}".strip("|") if cell(row, col_name_en) or cell(row, col_name_hans) else account.note
+        account.parent_id = None
+        db.add(account)
+
+        parent_code = cell(row, col_parent_code)
+        parent_name = cell(row, col_parent_name)
+        if parent_code:
+            parent_map[code] = parent_code
+        elif parent_name and parent_name != name:
+            parent = by_name.get(parent_name)
+            if parent is None:
+                result.errors.append(f"第 {idx} 列:上層科目名稱「{parent_name}」不存在,已忽略上層設定")
+            else:
+                account.parent_id = parent.id
+                db.add(account)
+
+    db.flush()
+
+    for code, parent_code in parent_map.items():
+        account = by_code.get(code)
+        if account is None:
+            continue
+        parent = by_code.get(parent_code)
+        if parent is None:
+            result.errors.append(f"科目 {code}:上層科目代碼「{parent_code}」不存在,已忽略上層設定")
+            continue
+        account.parent_id = parent.id
+        db.add(account)
+
+    if replace:
+        stale_accounts = [account for account in all_accounts if account.code not in imported_codes]
+        stale_ids = [account.id for account in stale_accounts]
+        if stale_ids:
+            db.execute(delete(BudgetEntry).where(BudgetEntry.account_id.in_(stale_ids)))
+            db.execute(delete(Actual).where(Actual.account_id.in_(stale_ids)))
+            db.execute(delete(ExpenseFormatAccountMap).where(ExpenseFormatAccountMap.account_id.in_(stale_ids)))
+            db.execute(update(Product).where(Product.revenue_account_id.in_(stale_ids)).values(revenue_account_id=None))
+            db.execute(
+                update(AssetCategory)
+                .where(or_(AssetCategory.asset_account_id.in_(stale_ids), AssetCategory.expense_account_id.in_(stale_ids)))
+                .values(asset_account_id=None, expense_account_id=None)
+            )
+            db.execute(update(Account).where(Account.parent_id.in_(stale_ids)).values(parent_id=None))
+            db.execute(delete(Account).where(Account.id.in_(stale_ids)))
+            result.deactivated = len(stale_ids)
 
     db.commit()
     return result

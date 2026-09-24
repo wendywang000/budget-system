@@ -10,6 +10,7 @@ from ..database import get_db
 from ..deps import accessible_department_ids, get_current_user, require_admin
 from ..models import (
     Account,
+    AccountCategoryOption,
     Actual,
     AccessGrant,
     AssetCategory,
@@ -27,6 +28,9 @@ from ..models import (
     VersionStatus,
 )
 from ..schemas import (
+    AccountCategoryOptionCreate,
+    AccountCategoryOptionOut,
+    AccountCategoryOptionUpdate,
     AccountCreate,
     AccountOut,
     AccountUpdate,
@@ -173,6 +177,68 @@ def list_accounts(
         out.has_children = child_flags.get(account.id, False)
         rows.append(out)
     return rows
+
+
+@router.get("/account-categories", response_model=list[AccountCategoryOptionOut], summary="會計科目類別清單")
+def list_account_categories(
+    active_only: bool = True,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[AccountCategoryOptionOut]:
+    stmt = select(AccountCategoryOption).order_by(AccountCategoryOption.sort_order, AccountCategoryOption.code)
+    if active_only:
+        stmt = stmt.where(AccountCategoryOption.is_active.is_(True))
+    return [AccountCategoryOptionOut.model_validate(item) for item in db.scalars(stmt)]
+
+
+@router.post("/account-categories", response_model=AccountCategoryOptionOut, status_code=201, summary="新增會計科目類別")
+def create_account_category(
+    payload: AccountCategoryOptionCreate,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AccountCategoryOptionOut:
+    if db.scalar(select(AccountCategoryOption).where(AccountCategoryOption.code == payload.code)):
+        raise HTTPException(status.HTTP_409_CONFLICT, "類別代碼已存在")
+    category = AccountCategoryOption(**payload.model_dump())
+    db.add(category)
+    db.commit()
+    db.refresh(category)
+    return AccountCategoryOptionOut.model_validate(category)
+
+
+@router.patch("/account-categories/{category_id}", response_model=AccountCategoryOptionOut, summary="修改會計科目類別")
+def update_account_category(
+    category_id: int,
+    payload: AccountCategoryOptionUpdate,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AccountCategoryOptionOut:
+    category = db.get(AccountCategoryOption, category_id)
+    if category is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "類別不存在")
+    data = payload.model_dump(exclude_unset=True)
+    if "code" in data and data["code"] != category.code:
+        if db.scalar(select(AccountCategoryOption).where(AccountCategoryOption.code == data["code"])):
+            raise HTTPException(status.HTTP_409_CONFLICT, "類別代碼已存在")
+    for field, value in data.items():
+        setattr(category, field, value)
+    db.add(category)
+    db.commit()
+    db.refresh(category)
+    return AccountCategoryOptionOut.model_validate(category)
+
+
+@router.delete("/account-categories/{category_id}", status_code=204, response_model=None, summary="刪除會計科目類別")
+def delete_account_category(
+    category_id: int,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> None:
+    category = db.get(AccountCategoryOption, category_id)
+    if category is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "類別不存在")
+    db.delete(category)
+    db.commit()
 
 
 @router.post("/accounts", response_model=AccountOut, status_code=201, summary="新增科目")

@@ -114,12 +114,34 @@ class DepartmentOut(ORMModel, DepartmentBase):
 class AccountBase(BaseModel):
     code: str = Field(max_length=20)
     name: str = Field(max_length=100)
-    category: AccountCategory
+    category: str = Field(max_length=50)
     parent_id: int | None = None
     is_postable: bool = True
     sort_order: int = 0
     is_active: bool = True
     note: str | None = None
+
+
+class AccountCategoryOptionBase(BaseModel):
+    code: str = Field(max_length=50)
+    name: str = Field(max_length=100)
+    sort_order: int = 0
+    is_active: bool = True
+
+
+class AccountCategoryOptionCreate(AccountCategoryOptionBase):
+    pass
+
+
+class AccountCategoryOptionUpdate(BaseModel):
+    code: str | None = Field(default=None, max_length=50)
+    name: str | None = Field(default=None, max_length=100)
+    sort_order: int | None = None
+    is_active: bool | None = None
+
+
+class AccountCategoryOptionOut(ORMModel, AccountCategoryOptionBase):
+    id: int
 
 
 class AccountCreate(AccountBase):
@@ -129,7 +151,7 @@ class AccountCreate(AccountBase):
 class AccountUpdate(BaseModel):
     code: str | None = None
     name: str | None = None
-    category: AccountCategory | None = None
+    category: str | None = None
     parent_id: int | None = None
     is_postable: bool | None = None
     sort_order: int | None = None
@@ -298,6 +320,7 @@ class ActualUpsertRequest(BaseModel):
 class ImportResult(BaseModel):
     inserted: int = 0
     updated: int = 0
+    deactivated: int = 0
     skipped: int = 0
     errors: list[str] = Field(default_factory=list)
 

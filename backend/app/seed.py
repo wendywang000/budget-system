@@ -14,6 +14,7 @@ from .database import Base, SessionLocal, engine
 from .models import (
     Account,
     AccountCategory,
+    AccountCategoryOption,
     AccessGrant,
     AssetCategory,
     Customer,
@@ -105,6 +106,24 @@ def seed_accounts(db: Session) -> dict[str, Account]:
         db.flush()
         by_code[row["code"]] = account
     return by_code
+
+
+def seed_account_categories(db: Session) -> None:
+    rows = [
+        ("revenue", "營業收入", 10),
+        ("cost", "營業成本", 20),
+        ("expense", "營業費用", 30),
+        ("capex", "資本支出", 40),
+    ]
+    for code, name, sort_order in rows:
+        existing = db.scalar(select(AccountCategoryOption).where(AccountCategoryOption.code == code))
+        if existing:
+            existing.name = name
+            existing.sort_order = sort_order
+            existing.is_active = True
+            db.add(existing)
+            continue
+        db.add(AccountCategoryOption(code=code, name=name, sort_order=sort_order, is_active=True))
 
 
 PRODUCTS: list[dict] = [
@@ -274,6 +293,7 @@ def run() -> None:
     with SessionLocal() as db:
         departments = seed_departments(db)
         accounts = seed_accounts(db)
+        seed_account_categories(db)
         seed_products(db, accounts)
         seed_customers(db)
         seed_salespeople(db, departments)

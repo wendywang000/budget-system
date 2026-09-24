@@ -113,6 +113,18 @@ class Department(Base):
     children: Mapped[list[Department]] = relationship(back_populates="parent")
 
 
+class AccountCategoryOption(Base):
+    """可選的會計科目類別主檔,支援系統預設類別與自訂分類。"""
+
+    __tablename__ = "account_category_options"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class Account(Base):
     """會計科目。父科目僅作分組表頭,實際金額只掛在 is_postable 的葉科目上。"""
 
@@ -121,7 +133,7 @@ class Account(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     code: Mapped[str] = mapped_column(String(20), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(100))
-    category: Mapped[AccountCategory] = mapped_column(Enum(AccountCategory))
+    category: Mapped[str] = mapped_column(String(50), default=AccountCategory.expense.value)
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"), index=True)
     is_postable: Mapped[bool] = mapped_column(Boolean, default=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)

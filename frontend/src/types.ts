@@ -76,11 +76,19 @@ export interface Department {
   has_children: boolean;
 }
 
+export interface AccountCategoryOption {
+  id: number;
+  code: string;
+  name: string;
+  sort_order: number;
+  is_active: boolean;
+}
+
 export interface Account {
   id: number;
   code: string;
   name: string;
-  category: AccountCategory;
+  category: string;
   parent_id: number | null;
   is_postable: boolean;
   sort_order: number;
@@ -184,6 +192,7 @@ export interface VarianceResponse {
 export interface ImportResult {
   inserted: number;
   updated: number;
+  deactivated: number;
   skipped: number;
   errors: string[];
 }
