@@ -293,6 +293,452 @@ async def import_departments(
 
 
 # --------------------------------------------------------------------------- #
+# 產品、客戶、銷售人員、資產類別、費用格式主檔:範本 / 匯出 / 匯入
+# --------------------------------------------------------------------------- #
+
+
+def _as_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def _parse_bool(value) -> bool:
+    text = _as_text(value).lower()
+    if text in {"", "0", "n", "no", "否", "停用", "false"}:
+        return False
+    if text in {"1", "y", "yes", "是", "启用", "true", "啟用"}:
+        return True
+    return bool(text)
+
+
+def _parse_float(value) -> float:
+    text = _as_text(value).replace(",", "")
+    if not text:
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+PRODUCT_HEADERS = ["*產品代碼", "*產品名稱", "分類", "單位", "標準售價", "標準成本", "收入科目代碼", "啟用"]
+CUSTOMER_HEADERS = ["*客戶代碼", "*客戶名稱", "區域", "業務負責人", "啟用"]
+SALESPERSON_HEADERS = ["*銷售人員代碼", "*銷售人員姓名", "*所屬預算單位代碼", "啟用"]
+ASSET_CATEGORY_HEADERS = ["*資產類別代號", "*資產類別名稱", "攤銷月數", "資產科目代碼", "費用科目代碼", "啟用"]
+EXPENSE_FORMAT_HEADERS = [
+    "*費用格式代號",
+    "*費用格式名稱",
+    "排序",
+    "欄位定義(key|label;key2|label2)",
+    "銷售科目代碼",
+    "管理科目代碼",
+    "研發科目代碼",
+    "製造科目代碼",
+    "啟用",
+]
+
+
+def _write_master_rows(ws, headers: list[str], rows: list[list[str | float | int | bool]]) -> None:
+    ws.append(headers)
+    for col in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=col)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+    for row in rows:
+        ws.append(["" if value is None else value for value in row])
+    for idx in range(1, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(idx)].width = 18
+
+
+@router.get("/products/template", summary="下載產品主檔匯入範本")
+def download_product_template(_: User = Depends(require_admin)) -> StreamingResponse:
+    wb = Workbook(); ws = wb.active; ws.title = "產品主檔"; _write_master_rows(ws, PRODUCT_HEADERS, [])
+    return _xlsx_response(wb, "products_template.xlsx")
+
+
+@router.get("/products/export", summary="匯出產品主檔")
+def export_products(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> StreamingResponse:
+    products = db.scalars(select(Product).order_by(Product.code)).all()
+    wb = Workbook(); ws = wb.active; ws.title = "產品主檔"
+    rows: list[list[str | float | int | bool]] = []
+    for product in products:
+        rows.append([
+            product.code,
+            product.name,
+            product.category or "",
+            product.unit,
+            product.unit_price,
+            product.unit_cost,
+            product.revenue_account.code if product.revenue_account else "",
+            product.is_active,
+        ])
+    _write_master_rows(ws, PRODUCT_HEADERS, rows)
+    return _xlsx_response(wb, "products.xlsx")
+
+
+@router.post("/products/import", response_model=ImportResult, summary="匯入產品主檔")
+async def import_products(
+    file: UploadFile,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> ImportResult:
+    result = ImportResult(inserted=0, updated=0, deactivated=0, skipped=0, errors=[])
+    content = await file.read()
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"無法讀取 Excel 檔案:{exc}") from exc
+    ws = wb.active
+    header_row = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    idx_code = next((idx for idx, h in enumerate(header_row) if _as_text(h).replace("*", "") in {"產品代碼", "代碼", "產品代号"}), None)
+    idx_name = next((idx for idx, h in enumerate(header_row) if _as_text(h).replace("*", "") in {"產品名稱", "名稱", "產品名"}), None)
+    if idx_code is None or idx_name is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "找不到「產品代碼」或「產品名稱」欄位")
+    idx_category = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"分類", "類別"}), None)
+    idx_unit = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"單位", "單位/規格"}), None)
+    idx_unit_price = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"標準售價", "售價"}), None)
+    idx_unit_cost = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"標準成本", "成本"}), None)
+    idx_account = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"收入科目代碼", "收入科目", "對應收入科目"}), None)
+    idx_active = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"啟用", "有效", "狀態"}), None)
+
+    for row_index, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        if row is None or all(v is None for v in row):
+            continue
+        code = _as_text(row[idx_code] if idx_code < len(row) else None)
+        name = _as_text(row[idx_name] if idx_name < len(row) else None)
+        if not code or not name:
+            result.skipped += 1
+            result.errors.append(f"第 {row_index} 列:產品代碼或名稱空白,已略過")
+            continue
+        account_code = _as_text(row[idx_account] if idx_account is not None and idx_account < len(row) else None)
+        account = db.scalar(select(Account).where(Account.code == account_code)) if account_code else None
+        product = db.scalar(select(Product).where(Product.code == code))
+        if product is None:
+            product = Product(code=code, name=name)
+            result.inserted += 1
+            db.add(product)
+        else:
+            result.updated += 1
+        product.name = name
+        product.category = _as_text(row[idx_category] if idx_category is not None and idx_category < len(row) else None) or None
+        product.unit = _as_text(row[idx_unit] if idx_unit is not None and idx_unit < len(row) else None) or "PCS"
+        product.unit_price = _parse_float(row[idx_unit_price] if idx_unit_price is not None and idx_unit_price < len(row) else 0)
+        product.unit_cost = _parse_float(row[idx_unit_cost] if idx_unit_cost is not None and idx_unit_cost < len(row) else 0)
+        product.revenue_account_id = account.id if account else None
+        is_active = _parse_bool(row[idx_active] if idx_active is not None and idx_active < len(row) else True)
+        product.is_active = is_active
+        if not is_active:
+            result.deactivated += 1
+        db.add(product)
+    db.commit()
+    return result
+
+
+@router.get("/customers/template", summary="下載客戶主檔匯入範本")
+def download_customer_template(_: User = Depends(require_admin)) -> StreamingResponse:
+    wb = Workbook(); ws = wb.active; ws.title = "客戶主檔"; _write_master_rows(ws, CUSTOMER_HEADERS, [])
+    return _xlsx_response(wb, "customers_template.xlsx")
+
+
+@router.get("/customers/export", summary="匯出客戶主檔")
+def export_customers(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> StreamingResponse:
+    customers = db.scalars(select(Customer).order_by(Customer.code)).all()
+    wb = Workbook(); ws = wb.active; ws.title = "客戶主檔"
+    rows = [[c.code, c.name, c.region or "", c.sales_rep or "", c.is_active] for c in customers]
+    _write_master_rows(ws, CUSTOMER_HEADERS, rows)
+    return _xlsx_response(wb, "customers.xlsx")
+
+
+@router.post("/customers/import", response_model=ImportResult, summary="匯入客戶主檔")
+async def import_customers(
+    file: UploadFile,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> ImportResult:
+    result = ImportResult(inserted=0, updated=0, deactivated=0, skipped=0, errors=[])
+    content = await file.read()
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"無法讀取 Excel 檔案:{exc}") from exc
+    ws = wb.active
+    header_row = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    idx_code = next((idx for idx, h in enumerate(header_row) if _as_text(h).replace("*", "") in {"客戶代碼", "代碼"}), None)
+    idx_name = next((idx for idx, h in enumerate(header_row) if _as_text(h).replace("*", "") in {"客戶名稱", "名稱"}), None)
+    if idx_code is None or idx_name is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "找不到「客戶代碼」或「客戶名稱」欄位")
+    idx_region = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"區域", "區域別"}), None)
+    idx_sales_rep = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"業務負責人", "業務", "銷售人員"}), None)
+    idx_active = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"啟用", "有效", "狀態"}), None)
+    for row_index, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        if row is None or all(v is None for v in row):
+            continue
+        code = _as_text(row[idx_code] if idx_code < len(row) else None)
+        name = _as_text(row[idx_name] if idx_name < len(row) else None)
+        if not code or not name:
+            result.skipped += 1
+            result.errors.append(f"第 {row_index} 列:客戶代碼或名稱空白,已略過")
+            continue
+        customer = db.scalar(select(Customer).where(Customer.code == code))
+        if customer is None:
+            customer = Customer(code=code, name=name)
+            result.inserted += 1
+            db.add(customer)
+        else:
+            result.updated += 1
+        customer.name = name
+        customer.region = _as_text(row[idx_region] if idx_region is not None and idx_region < len(row) else None) or None
+        customer.sales_rep = _as_text(row[idx_sales_rep] if idx_sales_rep is not None and idx_sales_rep < len(row) else None) or None
+        customer.is_active = _parse_bool(row[idx_active] if idx_active is not None and idx_active < len(row) else True)
+        if not customer.is_active:
+            result.deactivated += 1
+        db.add(customer)
+    db.commit()
+    return result
+
+
+@router.get("/salespeople/template", summary="下載銷售人員主檔匯入範本")
+def download_salespeople_template(_: User = Depends(require_admin)) -> StreamingResponse:
+    wb = Workbook(); ws = wb.active; ws.title = "銷售人員主檔"; _write_master_rows(ws, SALESPERSON_HEADERS, [])
+    return _xlsx_response(wb, "salespeople_template.xlsx")
+
+
+@router.get("/salespeople/export", summary="匯出銷售人員主檔")
+def export_salespeople(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> StreamingResponse:
+    salespeople = db.scalars(select(Salesperson).order_by(Salesperson.code)).all()
+    wb = Workbook(); ws = wb.active; ws.title = "銷售人員主檔"
+    rows = [[sp.code, sp.name, sp.department.code if sp.department else "", sp.is_active] for sp in salespeople]
+    _write_master_rows(ws, SALESPERSON_HEADERS, rows)
+    return _xlsx_response(wb, "salespeople.xlsx")
+
+
+@router.post("/salespeople/import", response_model=ImportResult, summary="匯入銷售人員主檔")
+async def import_salespeople(
+    file: UploadFile,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> ImportResult:
+    result = ImportResult(inserted=0, updated=0, deactivated=0, skipped=0, errors=[])
+    content = await file.read()
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"無法讀取 Excel 檔案:{exc}") from exc
+    ws = wb.active
+    header_row = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    idx_code = next((idx for idx, h in enumerate(header_row) if _as_text(h).replace("*", "") in {"銷售人員代碼", "代碼"}), None)
+    idx_name = next((idx for idx, h in enumerate(header_row) if _as_text(h).replace("*", "") in {"銷售人員姓名", "姓名"}), None)
+    idx_dept = next((idx for idx, h in enumerate(header_row) if _as_text(h).replace("*", "") in {"所屬預算單位代碼", "部門代碼", "預算單位代碼"}), None)
+    idx_active = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"啟用", "有效", "狀態"}), None)
+    if idx_code is None or idx_name is None or idx_dept is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "找不到「銷售人員代碼」、「姓名」或「所屬預算單位代碼」欄位")
+    for row_index, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        if row is None or all(v is None for v in row):
+            continue
+        code = _as_text(row[idx_code] if idx_code < len(row) else None)
+        name = _as_text(row[idx_name] if idx_name < len(row) else None)
+        dept_code = _as_text(row[idx_dept] if idx_dept < len(row) else None)
+        if not code or not name or not dept_code:
+            result.skipped += 1
+            result.errors.append(f"第 {row_index} 列:代碼、姓名或部門代碼空白,已略過")
+            continue
+        department = db.scalar(select(Department).where(Department.code == dept_code))
+        if department is None:
+            result.skipped += 1
+            result.errors.append(f"第 {row_index} 列:部門代碼「{dept_code}」不存在,已略過")
+            continue
+        salesperson = db.scalar(select(Salesperson).where(Salesperson.code == code))
+        if salesperson is None:
+            salesperson = Salesperson(code=code, name=name, department_id=department.id)
+            result.inserted += 1
+            db.add(salesperson)
+        else:
+            result.updated += 1
+        salesperson.name = name
+        salesperson.department_id = department.id
+        salesperson.is_active = _parse_bool(row[idx_active] if idx_active is not None and idx_active < len(row) else True)
+        if not salesperson.is_active:
+            result.deactivated += 1
+        db.add(salesperson)
+    db.commit()
+    return result
+
+
+@router.get("/asset-categories/template", summary="下載資產類別匯入範本")
+def download_asset_categories_template(_: User = Depends(require_admin)) -> StreamingResponse:
+    wb = Workbook(); ws = wb.active; ws.title = "資產類別主檔"; _write_master_rows(ws, ASSET_CATEGORY_HEADERS, [])
+    return _xlsx_response(wb, "asset_categories_template.xlsx")
+
+
+@router.get("/asset-categories/export", summary="匯出資產類別主檔")
+def export_asset_categories(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> StreamingResponse:
+    categories = db.scalars(select(AssetCategory).order_by(AssetCategory.code)).all()
+    wb = Workbook(); ws = wb.active; ws.title = "資產類別主檔"
+    rows = [[c.code, c.name, c.depreciation_months, c.asset_account.code if c.asset_account else "", c.expense_account.code if c.expense_account else "", c.is_active] for c in categories]
+    _write_master_rows(ws, ASSET_CATEGORY_HEADERS, rows)
+    return _xlsx_response(wb, "asset_categories.xlsx")
+
+
+@router.post("/asset-categories/import", response_model=ImportResult, summary="匯入資產類別主檔")
+async def import_asset_categories(
+    file: UploadFile,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> ImportResult:
+    result = ImportResult(inserted=0, updated=0, deactivated=0, skipped=0, errors=[])
+    content = await file.read()
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"無法讀取 Excel 檔案:{exc}") from exc
+    ws = wb.active
+    header_row = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    idx_code = next((idx for idx, h in enumerate(header_row) if _as_text(h).replace("*", "") in {"資產類別代號", "代碼"}), None)
+    idx_name = next((idx for idx, h in enumerate(header_row) if _as_text(h).replace("*", "") in {"資產類別名稱", "名稱"}), None)
+    idx_months = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"攤銷月數", "折舊月數"}), None)
+    idx_asset = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"資產科目代碼", "資產科目", "資產帳科"}), None)
+    idx_expense = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"費用科目代碼", "折舊費用科目", "費用科目"}), None)
+    idx_active = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"啟用", "有效", "狀態"}), None)
+    if idx_code is None or idx_name is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "找不到「資產類別代號」或「資產類別名稱」欄位")
+    for row_index, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        if row is None or all(v is None for v in row):
+            continue
+        code = _as_text(row[idx_code] if idx_code < len(row) else None)
+        name = _as_text(row[idx_name] if idx_name < len(row) else None)
+        if not code or not name:
+            result.skipped += 1
+            result.errors.append(f"第 {row_index} 列:資產類別代號或名稱空白,已略過")
+            continue
+        category = db.scalar(select(AssetCategory).where(AssetCategory.code == code))
+        if category is None:
+            category = AssetCategory(code=code, name=name)
+            result.inserted += 1
+            db.add(category)
+        else:
+            result.updated += 1
+        category.name = name
+        category.depreciation_months = int(_parse_float(row[idx_months] if idx_months is not None and idx_months < len(row) else 0))
+        asset_code = _as_text(row[idx_asset] if idx_asset is not None and idx_asset < len(row) else None)
+        expense_code = _as_text(row[idx_expense] if idx_expense is not None and idx_expense < len(row) else None)
+        category.asset_account = db.scalar(select(Account).where(Account.code == asset_code)) if asset_code else None
+        category.expense_account = db.scalar(select(Account).where(Account.code == expense_code)) if expense_code else None
+        category.is_active = _parse_bool(row[idx_active] if idx_active is not None and idx_active < len(row) else True)
+        if not category.is_active:
+            result.deactivated += 1
+        db.add(category)
+    db.commit()
+    return result
+
+
+@router.get("/expense-formats/template", summary="下載費用格式匯入範本")
+def download_expense_formats_template(_: User = Depends(require_admin)) -> StreamingResponse:
+    wb = Workbook(); ws = wb.active; ws.title = "費用格式主檔"; _write_master_rows(ws, EXPENSE_FORMAT_HEADERS, [])
+    return _xlsx_response(wb, "expense_formats_template.xlsx")
+
+
+@router.get("/expense-formats/export", summary="匯出費用格式主檔")
+def export_expense_formats(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> StreamingResponse:
+    formats = db.scalars(select(ExpenseFormat).order_by(ExpenseFormat.sort_order, ExpenseFormat.code)).all()
+    wb = Workbook(); ws = wb.active; ws.title = "費用格式主檔"
+    rows: list[list[str | float | int | bool]] = []
+    for fmt in formats:
+        columns = ";".join(f"{c.key}|{c.label}" for c in sorted(fmt.columns, key=lambda c: c.sort_order))
+        account_map = {m.function: m.account.code if m.account else "" for m in fmt.account_maps}
+        rows.append([
+            fmt.code,
+            fmt.name,
+            fmt.sort_order,
+            columns,
+            account_map.get("sales", ""),
+            account_map.get("admin", ""),
+            account_map.get("rd", ""),
+            account_map.get("manufacturing", ""),
+            fmt.is_active,
+        ])
+    _write_master_rows(ws, EXPENSE_FORMAT_HEADERS, rows)
+    return _xlsx_response(wb, "expense_formats.xlsx")
+
+
+@router.post("/expense-formats/import", response_model=ImportResult, summary="匯入費用格式主檔")
+async def import_expense_formats(
+    file: UploadFile,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> ImportResult:
+    result = ImportResult(inserted=0, updated=0, deactivated=0, skipped=0, errors=[])
+    content = await file.read()
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"無法讀取 Excel 檔案:{exc}") from exc
+    ws = wb.active
+    header_row = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    idx_code = next((idx for idx, h in enumerate(header_row) if _as_text(h).replace("*", "") in {"費用格式代號", "代碼"}), None)
+    idx_name = next((idx for idx, h in enumerate(header_row) if _as_text(h).replace("*", "") in {"費用格式名稱", "名稱"}), None)
+    idx_sort = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"排序", "順序"}), None)
+    idx_columns = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"欄位定義(key|label;key2|label2)", "欄位定義", "欄位"}), None)
+    idx_sales = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"銷售科目代碼", "銷科目代碼", "銷"}), None)
+    idx_admin = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"管理科目代碼", "管科目代碼", "管"}), None)
+    idx_rd = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"研發科目代碼", "研科目代碼", "研"}), None)
+    idx_manufacturing = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"製造科目代碼", "製科目代碼", "製"}), None)
+    idx_active = next((idx for idx, h in enumerate(header_row) if _as_text(h) in {"啟用", "有效", "狀態"}), None)
+    if idx_code is None or idx_name is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "找不到「費用格式代號」或「費用格式名稱」欄位")
+    for row_index, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        if row is None or all(v is None for v in row):
+            continue
+        code = _as_text(row[idx_code] if idx_code < len(row) else None)
+        name = _as_text(row[idx_name] if idx_name < len(row) else None)
+        if not code or not name:
+            result.skipped += 1
+            result.errors.append(f"第 {row_index} 列:費用格式代號或名稱空白,已略過")
+            continue
+        fmt = db.scalar(select(ExpenseFormat).where(ExpenseFormat.code == code))
+        if fmt is None:
+            fmt = ExpenseFormat(code=code, name=name)
+            result.inserted += 1
+            db.add(fmt)
+            db.flush()
+        else:
+            result.updated += 1
+        fmt.name = name
+        fmt.sort_order = int(_parse_float(row[idx_sort] if idx_sort is not None and idx_sort < len(row) else 0))
+        fmt.is_active = _parse_bool(row[idx_active] if idx_active is not None and idx_active < len(row) else True)
+        if not fmt.is_active:
+            result.deactivated += 1
+        db.query(ExpenseFormatColumn).filter(ExpenseFormatColumn.format_id == fmt.id).delete()
+        columns_text = _as_text(row[idx_columns] if idx_columns is not None and idx_columns < len(row) else "")
+        if columns_text:
+            for sort_order, item in enumerate(columns_text.split(";"), start=0):
+                value = item.strip()
+                if not value or "|" not in value:
+                    continue
+                key, label = [segment.strip() for segment in value.split("|", 1)]
+                if not key or not label:
+                    continue
+                db.add(ExpenseFormatColumn(format_id=fmt.id, key=key, label=label, sort_order=sort_order))
+        db.query(ExpenseFormatAccountMap).filter(ExpenseFormatAccountMap.format_id == fmt.id).delete()
+        for fn_name, index in {"sales": idx_sales, "admin": idx_admin, "rd": idx_rd, "manufacturing": idx_manufacturing}.items():
+            if index is None or index >= len(row):
+                continue
+            code_value = _as_text(row[index])
+            if not code_value:
+                continue
+            account = db.scalar(select(Account).where(Account.code == code_value))
+            if account is None:
+                result.errors.append(f"第 {row_index} 列:{fn_name} 對應科目代碼「{code_value}」不存在,已忽略")
+                continue
+            db.add(ExpenseFormatAccountMap(format_id=fmt.id, function=ExpenseFunction[fn_name], account_id=account.id))
+        db.add(fmt)
+    db.commit()
+    return result
+
+
+# --------------------------------------------------------------------------- #
 # 會計科目主檔:範本 / 匯出 / 匯入
 # --------------------------------------------------------------------------- #
 ACCOUNT_HEADERS = [
