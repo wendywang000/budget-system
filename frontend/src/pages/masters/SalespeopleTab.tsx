@@ -1,6 +1,7 @@
-import { FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 import { api, apiErrorMessage } from "../../api/client";
-import type { Department, Salesperson } from "../../types";
+import type { Department, ImportResult, Salesperson } from "../../types";
+import { downloadBlob, filenameFromDisposition } from "../../utils/format";
 
 const emptyForm = {
   id: null as number | null,
@@ -17,6 +18,8 @@ export default function SalespeopleTab() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
+  const [busy, setBusy] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   async function load() {
     setLoading(true);
@@ -82,8 +85,60 @@ export default function SalespeopleTab() {
     }
   }
 
+  async function handleTemplate() {
+    setError(null);
+    try {
+      const res = await api.get("/excel/salespeople/template", { responseType: "blob" });
+      downloadBlob(res.data, filenameFromDisposition(res.headers["content-disposition"], "salespeople_template.xlsx"));
+    } catch (err) {
+      setError(apiErrorMessage(err));
+    }
+  }
+
+  async function handleExport() {
+    setError(null);
+    try {
+      const res = await api.get("/excel/salespeople/export", { responseType: "blob" });
+      downloadBlob(res.data, filenameFromDisposition(res.headers["content-disposition"], "salespeople.xlsx"));
+    } catch (err) {
+      setError(apiErrorMessage(err));
+    }
+  }
+
+  async function handleImport(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const res = await api.post<ImportResult>("/excel/salespeople/import", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      const r = res.data;
+      setMessage(`匯入完成:新增 ${r.inserted}、更新 ${r.updated}${r.deactivated ? `、停用 ${r.deactivated}` : ""}、略過 ${r.skipped}。`);
+      if (r.errors.length) setError(r.errors.join("\n"));
+      await load();
+    } catch (err) {
+      setError(apiErrorMessage(err));
+    } finally {
+      setBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
   return (
     <div className="masters-tab">
+      <div className="page-toolbar">
+        <span className="hint-text">可匯入銷售人員資料，支援部門、代碼與姓名維護</span>
+        <div className="toolbar-spacer" />
+        <button type="button" onClick={handleTemplate} disabled={busy}>下載範本</button>
+        <button type="button" onClick={() => fileInputRef.current?.click()} disabled={busy}>{busy ? "處理中…" : "匯入 Excel"}</button>
+        <input ref={fileInputRef} type="file" accept=".xlsx" hidden onChange={handleImport} />
+        <button type="button" onClick={handleExport} disabled={busy}>匯出 Excel</button>
+      </div>
       <form className="masters-form" onSubmit={handleSubmit}>
         <h3>{form.id === null ? "新增銷售人員" : `編輯銷售人員 #${form.id}`}</h3>
         <p className="hint-text">銷售量預算以銷售人員填報,再依所屬預算單位滾算至部門彙總。</p>

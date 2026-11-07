@@ -1,7 +1,8 @@
-import { FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 import { api, apiErrorMessage } from "../../api/client";
-import type { Account, ExpenseFormat, ExpenseFunction } from "../../types";
+import type { Account, ExpenseFormat, ExpenseFunction, ImportResult } from "../../types";
 import { FUNCTION_LABELS } from "../../types";
+import { downloadBlob, filenameFromDisposition } from "../../utils/format";
 
 const FUNCTIONS: ExpenseFunction[] = ["sales", "admin", "rd", "manufacturing"];
 
@@ -23,6 +24,8 @@ export default function ExpenseFormatsTab() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
+  const [busy, setBusy] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   async function load() {
     setLoading(true);
@@ -118,8 +121,60 @@ export default function ExpenseFormatsTab() {
     }
   }
 
+  async function handleTemplate() {
+    setError(null);
+    try {
+      const res = await api.get("/excel/expense-formats/template", { responseType: "blob" });
+      downloadBlob(res.data, filenameFromDisposition(res.headers["content-disposition"], "expense_formats_template.xlsx"));
+    } catch (err) {
+      setError(apiErrorMessage(err));
+    }
+  }
+
+  async function handleExport() {
+    setError(null);
+    try {
+      const res = await api.get("/excel/expense-formats/export", { responseType: "blob" });
+      downloadBlob(res.data, filenameFromDisposition(res.headers["content-disposition"], "expense_formats.xlsx"));
+    } catch (err) {
+      setError(apiErrorMessage(err));
+    }
+  }
+
+  async function handleImport(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const res = await api.post<ImportResult>("/excel/expense-formats/import", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      const r = res.data;
+      setMessage(`匯入完成:新增 ${r.inserted}、更新 ${r.updated}${r.deactivated ? `、停用 ${r.deactivated}` : ""}、略過 ${r.skipped}。`);
+      if (r.errors.length) setError(r.errors.join("\n"));
+      await load();
+    } catch (err) {
+      setError(apiErrorMessage(err));
+    } finally {
+      setBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
   return (
     <div className="masters-tab">
+      <div className="page-toolbar">
+        <span className="hint-text">可匯入費用格式資料，支援欄位設定與各功能別科目對應</span>
+        <div className="toolbar-spacer" />
+        <button type="button" onClick={handleTemplate} disabled={busy}>下載範本</button>
+        <button type="button" onClick={() => fileInputRef.current?.click()} disabled={busy}>{busy ? "處理中…" : "匯入 Excel"}</button>
+        <input ref={fileInputRef} type="file" accept=".xlsx" hidden onChange={handleImport} />
+        <button type="button" onClick={handleExport} disabled={busy}>匯出 Excel</button>
+      </div>
       <form className="masters-form" onSubmit={handleSubmit}>
         <h3>{form.id === null ? "新增費用收集格式" : `編輯費用格式 #${form.id}`}</h3>
         <p className="hint-text">
